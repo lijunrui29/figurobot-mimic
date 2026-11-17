@@ -1,0 +1,6 @@
+# 运行 main_mimic_demo.py / mimic_side.py 所需的全部依赖。
+# 注：pose_schema.py / safety.py / mimic_config.py 是纯标准库模块。
+# 桥接（bridge/）只用标准库 + adb，不需要 pip 包。
+opencv-python
+numpy
+onnxruntime

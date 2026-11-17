@@ -1,0 +1,17 @@
+# RTMPose 模型（约 21MB，不提交；README 有下载/放置说明）
+models/
+
+# 本地输出/个人数据：摄像头照片、侧视 pose 流、CSV、标定快照
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地 Claude 设置（不对外）
+.claude/
+CLAUDE.md
+
+# 日志
+*.log

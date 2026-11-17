@@ -1,0 +1,111 @@
+{
+  "_comment": "人体→机器人映射配置。以 _ 开头的键是注释，校验时原样保留、保存时不丢。JSON 不能写注释，这是本项目的替代约定。",
+  "_notes": [
+    "单位：human_neutral / min_deg / max_deg 都是度；min_deg/max_deg 是相对 robot_neutral 的偏移范围。",
+    "robot_neutral_tick 是原始 tick（0-4095），来自 2026-11-17 Motion_Reset 后的完整回读（data/robot_neutral.json）。",
+    "2026-11-17 真机实测修正：控制台 HTML 里的 JOINT_NAMES 是猜测，除 1/2/3 外大面积错误。实测映射见下，sign 已按现场观察 + 摄像头差分确认。",
+    "实测映射：3=左肘、8=右肘、6=右肩外展、13=左肩 pitch（前后抬，不是外展）；4/7=左腕两路、9=右腕、11=头（均不参与 mimic）。",
+    "左右肩不对称：6 号外展由正面机位的 upper_arm_abduction_signed 驱动；13 号 pitch 由侧视进程（mimic_side.py）的 upper_arm_flexion_signed 驱动。两肘：左肘 tick 增大 = 弯曲，右肘 tick 减小 = 弯曲。",
+    "开侧视：先 `python mimic_side.py`，再 `python main_mimic_demo.py --side-view data/side_stream`。",
+    "白名单只能收紧不能放宽：这里写错会直接报错。",
+    "source 语义见 mimic_config.SUPPORTED_SOURCES 与 mapper.HumanMeasurement 的 docstring。",
+    "min_deg/max_deg 仍是保守占位（±40°），实跑看跟随效果后再决定是否放宽。"
+  ],
+  "schema_version": "mimic-0.1",
+  "mount": "frontal",
+  "global": {
+    "whitelist": [
+      3,
+      6,
+      8,
+      13
+    ],
+    "tick_min": 50,
+    "tick_max": 3600,
+    "max_step_deg": 6.0,
+    "max_speed_deg_s": 45.0,
+    "watchdog_s": 0.5,
+    "max_consecutive_errors": 3,
+    "visibility_min": 0.3,
+    "edge_margin": 0.02,
+    "min_segment_ratio": 0.01,
+    "_comment": "全局安全参数。tick_min/tick_max 只能比硬限位 [50,3600] 更紧；visibility/edge/segment 三个门控与 features 同口径。"
+  },
+  "smoothing": {
+    "enabled": true,
+    "min_cutoff": 1.0,
+    "beta": 0.05,
+    "d_cutoff": 1.0,
+    "_comment": "One Euro Filter。enabled=false 时原样输出（等于关平滑）。参数未经实拍标定。"
+  },
+  "joints": [
+    {
+      "name": "左肘",
+      "enabled": true,
+      "source": "elbow_flex",
+      "sign": 1,
+      "scale": 1.0,
+      "human_neutral": 0.0,
+      "robot_neutral_tick": 1981,
+      "min_deg": -40.0,
+      "max_deg": 40.0,
+      "max_step_deg": 6.0,
+      "max_speed_deg_s": 45.0,
+      "smooth": true,
+      "calibrated": true,
+      "servo_id": 3,
+      "_comment": "实测 2026-11-17：3 号 = 左肘；tick 增大 = 左小臂向上/前抬起（弯曲）。elbow_flex 0=伸直，故 sign=+1。"
+    },
+    {
+      "name": "右肘",
+      "enabled": true,
+      "source": "elbow_flex",
+      "sign": -1,
+      "scale": 1.0,
+      "human_neutral": 0.0,
+      "robot_neutral_tick": 2133,
+      "min_deg": -40.0,
+      "max_deg": 40.0,
+      "max_step_deg": 6.0,
+      "max_speed_deg_s": 45.0,
+      "smooth": true,
+      "calibrated": true,
+      "servo_id": 8,
+      "_comment": "实测 2026-11-17：8 号 = 右肘；tick 减小 = 右小臂向上/前抬起（弯曲）。故 sign=-1。"
+    },
+    {
+      "name": "右肩外展",
+      "enabled": true,
+      "source": "upper_arm_abduction_signed",
+      "sign": 1,
+      "scale": 1.0,
+      "human_neutral": 0.0,
+      "robot_neutral_tick": 2138,
+      "min_deg": -40.0,
+      "max_deg": 40.0,
+      "max_step_deg": 6.0,
+      "max_speed_deg_s": 45.0,
+      "smooth": true,
+      "calibrated": true,
+      "servo_id": 6,
+      "_comment": "实测 2026-11-17：6 号 = 右肩外展；tick 减小 = 右臂向外抬。正对镜头时人右臂外展的有符号角为负，负角 → tick 减小，故 sign=+1。"
+    },
+    {
+      "name": "左肩前抬",
+      "enabled": true,
+      "source": "upper_arm_flexion_signed",
+      "sign": -1,
+      "scale": 1.0,
+      "human_neutral": 0.0,
+      "robot_neutral_tick": 1178,
+      "min_deg": -40.0,
+      "max_deg": 40.0,
+      "max_step_deg": 6.0,
+      "max_speed_deg_s": 45.0,
+      "smooth": true,
+      "calibrated": true,
+      "servo_id": 13,
+      "_comment": "实测 2026-11-17 侧视：13 号是左肩 pitch（+tick 向后、-tick 向前），不是外展；改由侧视进程的 upper_arm_flexion_signed 驱动。sign 先用 +1（侧视里向前抬为负角 → tick 减小 → 向前），实跑再确认。human_neutral 需开 --side-view 后按 n 重采。"
+    }
+  ]
+}

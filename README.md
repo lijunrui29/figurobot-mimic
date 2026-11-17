@@ -1,10 +1,10 @@
 # figurobot-mimic
 
-Figurobot 桌面人形机器人的**手臂模仿** demo：两台摄像头（正面 + 侧面）→
-RTMPose 关键点 → 人体手臂角度 → 映射成舵机目标 → 经 HTTP 桥接下发。
+Figurobot 桌面人形机器人的动作模仿demo：两台摄像头（正面 + 侧面）→
+RTMPose 关键点 → 人体动作角度 → 映射成舵机目标 → 经 HTTP 桥接下发。
 
 > 这是一个独立仓库，从 `rtm_action_demo` 的 mimic 分支迁移出来。
-> 动作识别那条线留在 `rtm_action_demo`；这里只做机器人手臂模仿。
+> 动作识别那条线留在 `rtm_action_demo`；这里只做机器人模仿。
 
 ## 数据流
 
@@ -26,8 +26,7 @@ cam2 侧面 (MSMF) ───────┘        （侧视进程单独跑，�
 具体映射写在 `mimic_config.json`：每个关节的 `servo_id`、`source`、`sign`、
 `robot_neutral_tick`。换一台机器人必须重新跑 `calibrate_robot.py` 标定。
 
-不要直接套控制台 HTML 里的 `JOINT_NAMES`——那是按左右对称推测的，和实测
-不一定一致。
+控制台 HTML 里的 `JOINT_NAMES`和实测不一定一致。
 
 ## 目录
 

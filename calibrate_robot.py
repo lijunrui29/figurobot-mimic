@@ -22,9 +22,9 @@
     python calibrate_robot.py probe --joint 8 --delta 60 --yes
     python calibrate_robot.py probe --joint 6 --delta 60 --yes
     python calibrate_robot.py probe --joint 13 --delta 60 --yes
-    python calibrate_robot.py apply --sign 3=+1 --sign 8=-1 --sign 6=+1 --sign 13=-1
+    python calibrate_robot.py apply --sign 3=+1 --sign 8=-1 --sign 6=+1 --sign 13=+1
 
-    （2026-11-17 实测：3=左肘、8=右肘、6=右肩外展、13=左肩外展；
+    （2026-11-17 实测：3=左肘、8=右肘、6=右肩外展、13=左肩前后 pitch（侧视）；
       4/7/9 是腕、11 是头，已移出白名单。）
 
 安全边界：
@@ -352,8 +352,8 @@ _SIGN_HINTS = {
     8: "tick 增大 = 右小臂伸直 → sign=-1；向上/前抬起（肘弯）→ sign=+1",
     6: "tick 增大 = 右臂向内/向下 → sign=+1；tick 减小 = 右臂向外抬（外展）"
        "（人体右臂外展的有符号角为负，负角 → tick 减小，故 sign=+1）",
-    13: "tick 减小 = 左臂向外抬（外展）→ sign=-1；tick 增大是向前抬，别把"
-        "这个方向当外展（人体左臂外展的有符号角为正，正角 → tick 减小，故 sign=-1）",
+    13: "tick 增大 = 左臂向后；tick 减小 = 向前（侧视 flexion 源）。"
+        "人左臂向后时机器人也向后 → sign=+1；相反则 -1",
 }
 
 

@@ -28,6 +28,7 @@ API:
 import argparse
 import base64
 import json
+import queue
 import subprocess
 import sys
 import threading
@@ -181,6 +182,11 @@ class Robot:
         # 插值批量写需要知道"上一次写到的 tick"，才能从当前位置铺到新目标。
         self._goal_lock = threading.Lock()
         self._last_goal = {}      # {servo_id: tick}
+        # 常驻串口 worker：启动一次后保持串口，后续写只走 stdin 管道。
+        self._worker_lock = threading.Lock()
+        self._worker_proc = None
+        self._worker_queue = queue.Queue()
+        self._worker_reader_thread = None
 
     def _cache_errs(self, err_by_id):
         """更新 error_code 缓存（full 读时调用）。"""
@@ -412,18 +418,134 @@ class Robot:
                     break
         return out
 
+    # ---- 常驻串口 worker（写路径） ----
+    _SERIAL_WORKER_REMOTE = "/tmp/figurobot_serial_worker.py"
+
+    def _find_serial_worker_local(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        p = os.path.join(here, "serial_worker.py")
+        return p if os.path.exists(p) else None
+
+    def _ensure_serial_worker_uploaded(self):
+        if getattr(self, "_serial_worker_uploaded", False):
+            return
+        local = self._find_serial_worker_local()
+        if not local:
+            raise RuntimeError("missing serial_worker.py (bridge/ 目录)")
+        subprocess.run(
+            [self.adb, "push", local, self._SERIAL_WORKER_REMOTE],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+        self._serial_worker_uploaded = True
+
+    def _worker_reader(self, proc):
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    self._worker_queue.put(line)
+        finally:
+            self._worker_queue.put(None)
+
+    def _worker_read(self, timeout):
+        try:
+            return self._worker_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _worker_stop(self):
+        proc = self._worker_proc
+        self._worker_proc = None
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+        while True:
+            try:
+                self._worker_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _ensure_worker(self):
+        proc = self._worker_proc
+        if proc is not None and proc.poll() is None:
+            return
+        self._worker_stop()
+        self._ensure_serial_worker_uploaded()
+        port = getattr(self, "_serial_port", None) or ""
+        base = [self.adb] + (["-s", self.serial] if self.serial else [])
+        remote = self._SERIAL_WORKER_REMOTE + (f" {port}" if port else "")
+        # adb shell 会分配 pty；不关 echo 的话，发过去的 JSON 会被回显成
+        # 一行，桥接会把回显误当成 ack，导致请求/应答错位。
+        cmd = base + ["shell", f"stty -echo 2>/dev/null; python3 -u {remote}"]
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1)
+        self._worker_proc = proc
+        self._worker_reader_thread = threading.Thread(
+            target=self._worker_reader, args=(proc,), daemon=True)
+        self._worker_reader_thread.start()
+        line = self._worker_read(6.0)
+        if line is None:
+            self._worker_stop()
+            raise RuntimeError("serial_worker 启动超时")
+        try:
+            ack = json.loads(line)
+        except Exception:
+            ack = {"ok": False, "error": line}
+        if not ack.get("ok"):
+            self._worker_stop()
+            raise RuntimeError("serial_worker: " + str(ack.get("error")))
+        if ack.get("port"):
+            self._serial_port = ack["port"]
+
+    def _worker_request(self, req, timeout=5.0):
+        """向常驻 worker 发一条请求并等 ack。调用方需持有 _worker_lock 吗？不，
+        这里自己加锁，HTTP 线程可以并发调用。"""
+        with self._worker_lock:
+            self._ensure_worker()
+            proc = self._worker_proc
+            if proc is None or proc.poll() is not None:
+                raise RuntimeError("serial_worker 未运行")
+            try:
+                proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except Exception as exc:
+                self._worker_stop()
+                raise RuntimeError(f"serial_worker 写入失败：{exc}")
+            line = self._worker_read(timeout)
+            if line is None:
+                self._worker_stop()
+                raise RuntimeError("serial_worker 响应超时")
+            try:
+                return json.loads(line)
+            except Exception as exc:
+                raise RuntimeError(f"serial_worker 返回不合法：{line!r}") from exc
+
+    def close(self):
+        """停止常驻 worker（桥接退出时调用）。"""
+        with self._worker_lock:
+            self._worker_stop()
+
     def joint_write(self, dev_id, position):
         frame = build_write(dev_id, ADDR["goal_position"], u32(position))
         hx = bytes(frame).hex()
-        out = self._serial_exec([hx])
-        parsed = self._parse_hex(out)
-        if not (isinstance(parsed, dict) and parsed.get("error")):
-            with self._goal_lock:
-                self._last_goal[int(dev_id)] = int(position)
-        return parsed
+        try:
+            ack = self._worker_request({"frames": [hx], "delay_ms": 0})
+        except Exception as exc:
+            return {"error": str(exc)}
+        if not ack.get("ok"):
+            return {"error": ack.get("error") or "write failed"}
+        with self._goal_lock:
+            self._last_goal[int(dev_id)] = int(position)
+        return {"ok": True, "sent": 1}
 
     def joint_write_batch(self, targets, ramp_ms=0, steps=1):
-        """一次 adb 调用写多个关节（goal_position），可选插值 ramp。
+        """通过常驻 worker 写多个关节（goal_position），可选插值 ramp。
 
         targets: {servo_id: position}。
         ramp_ms/steps：把"上次目标 → 本次目标"分成 steps 个中间目标，
@@ -432,8 +554,6 @@ class Robot:
 
         返回 {"ok": bool, "sent": {...}, "ramp_ms": ..., "steps": ...,
               "raw": ..., "error": ...}。
-        逐帧应答无法可靠对齐到关节（半双工总线），所以只判断整体是否
-        出现 SERIAL_ERROR；逐关节校验由上层 read_positions 做。
         """
         targets = {int(k): int(v) for k, v in (targets or {}).items()}
         if not targets:
@@ -455,23 +575,24 @@ class Robot:
                     frames.append(bytes(build_write(
                         sid, ADDR["goal_position"], u32(tick))).hex())
             delay_ms = max(1.0, ramp_ms / max(1, len(frames)))
-            out = self._serial_exec(frames, read_timeout=0.05,
-                                    one_by_one=False,
-                                    frame_delay_ms=delay_ms)
         else:
             frames = [bytes(build_write(sid, ADDR["goal_position"],
                                         u32(targets[sid]))).hex()
                       for sid in sorted(targets)]
-            # 写入不解析逐帧应答（上层用 read_positions 校验），一次发完即可
-            out = self._serial_exec(frames, read_timeout=0.2, one_by_one=False)
-        parsed = self._parse_hex(out)
-        if isinstance(parsed, dict) and parsed.get("error"):
+            delay_ms = 0.0
+
+        try:
+            ack = self._worker_request({"frames": frames,
+                                        "delay_ms": delay_ms})
+        except Exception as exc:
+            return {"ok": False, "sent": {}, "raw": "", "error": str(exc)}
+        if not ack.get("ok"):
             return {"ok": False, "sent": {}, "raw": "",
-                    "error": parsed["error"]}
+                    "error": ack.get("error") or "batch write failed"}
         with self._goal_lock:
             self._last_goal.update(targets)
         return {"ok": True, "sent": targets, "ramp_ms": ramp_ms,
-                "steps": steps, "raw": parsed}
+                "steps": steps, "raw": ack}
 
     def joint_read(self, dev_id):
         frame = build_read(dev_id, ADDR["present_position"], POSITION_LENGTH)
@@ -908,22 +1029,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def selftest_bridge():
-    """不碰硬件：用假 `_serial_exec` 验证批量写 / ramp 的帧数与间隔。"""
+    """不碰硬件：用假 `_worker_request` 验证批量写 / ramp 的帧数与间隔。"""
     r = Robot("adb")                 # 只存路径，不启动 adb
     calls = []
 
-    def fake(frames, read_timeout=0.4, one_by_one=False,
-             frame_delay_ms=None):
-        calls.append({"frames": list(frames), "delay": frame_delay_ms,
-                      "one_by_one": one_by_one})
-        return "HEX:"
+    def fake(req, timeout=5.0):
+        calls.append({"frames": list(req.get("frames") or []),
+                      "delay": req.get("delay_ms")})
+        return {"ok": True, "sent": len(req.get("frames") or [])}
 
-    r._serial_exec = fake
+    r._worker_request = fake
 
     # 1) 不插值：一关节一帧
     res = r.joint_write_batch({3: 2000, 6: 2100})
     assert res["ok"] and len(calls[-1]["frames"]) == 2, calls[-1]
-    assert calls[-1]["delay"] is None, calls[-1]
+    assert calls[-1]["delay"] == 0.0, calls[-1]
     assert r._last_goal == {3: 2000, 6: 2100}, r._last_goal
 
     # 2) 插值：8 步 × 2 关节 = 16 帧，总时长 800ms → 50ms/帧
@@ -935,10 +1055,11 @@ def selftest_bridge():
 
     # 3) steps=1 / ramp_ms=0 → 退回一步到位
     res = r.joint_write_batch({3: 2050}, ramp_ms=800, steps=1)
-    assert len(calls[-1]["frames"]) == 1 and calls[-1]["delay"] is None
+    assert len(calls[-1]["frames"]) == 1 and calls[-1]["delay"] == 0.0
 
-    # 4) 单关节写也更新 last_goal
+    # 4) 单关节写也走 worker，并更新 last_goal
     r.joint_write(6, 2050)
+    assert len(calls[-1]["frames"]) == 1 and calls[-1]["delay"] == 0.0
     assert r._last_goal[6] == 2050, r._last_goal
     print("selftest_bridge: OK")
 
@@ -977,6 +1098,8 @@ def main():
     except KeyboardInterrupt:
         print("\n[信息] 已停止")
         server.shutdown()
+    finally:
+        robot.close()
 
 
 if __name__ == "__main__":

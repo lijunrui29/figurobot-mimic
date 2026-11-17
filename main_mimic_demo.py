@@ -22,7 +22,8 @@
     python main_mimic_demo.py --no-display --video clip.mp4 --record log.csv
     python main_mimic_demo.py --robot-status     # 只读：桥接/关节回读（不下发）
     python main_mimic_demo.py --live             # 真机下发（未标定会直接拒绝）
-    python main_mimic_demo.py --live --ramp-ms 800 --ramp-steps 8  # 插值平滑
+    python main_mimic_demo.py --live --live-hz 8 --ramp-ms 0  # 高频、不插值
+    python main_mimic_demo.py --live --no-park-on-exit        # 退出保持最后目标
 
     python main_mimic_demo.py --selftest         # 合成数据自测（不碰摄像头/模型）
 
@@ -144,6 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "建议设成两次下发的间隔，如 800~1200")
     p.add_argument("--ramp-steps", type=int, default=8,
                    help="插值步数（越大越平滑，帧数 = steps × 关节数）")
+    p.add_argument("--park-on-exit", dest="park_on_exit", action="store_true",
+                   default=True,
+                   help="live 退出时发送中立目标，让机器人回自然姿态（默认开）")
+    p.add_argument("--no-park-on-exit", dest="park_on_exit",
+                   action="store_false",
+                   help="live 退出时不回位（保持最后目标）")
+    p.add_argument("--park-ramp-ms", type=int, default=4000,
+                   help="回位插值总时长（毫秒；默认 4000，约 45°/s）")
     p.add_argument("--robot-status", action="store_true",
                    help="只读：打印桥接状态与关节回读后退出（不跑摄像头、不下发）")
 
@@ -599,6 +608,22 @@ def run_pipeline(args: argparse.Namespace) -> None:
     finally:
         if live_sender is not None:
             live_sender.stop()
+        # live 退出回位：把机器人缓慢送回配置里的中立 tick，避免松开 q 后
+        # 它还停在最后一次目标上。
+        if args.live and args.park_on_exit and link is not None:
+            neutral = _seed_targets(cfg)
+            if neutral:
+                try:
+                    print("[mimic] 退出回位：发送中立目标 ...", flush=True)
+                    res = link.send_targets(neutral,
+                                            ramp_ms=args.park_ramp_ms,
+                                            steps=20)
+                    if res.ok:
+                        print("[mimic] 回位完成", flush=True)
+                    else:
+                        print(f"[mimic] 回位失败：{res.error}", flush=True)
+                except Exception as exc:
+                    print(f"[mimic] 回位失败：{exc}", flush=True)
         if recorder is not None:
             recorder.close()
             print(f"[record] 已写 {recorder.rows} 行 → {recorder.path}")
@@ -764,8 +789,13 @@ def selftest() -> None:
     # 自测不依赖用户当前采集的 human_neutral / 标定 sign（它们会被 n 键和
     # calibrate_robot 改写）；固定成一组已知值，断言才稳定。
     test_signs = {3: 1, 8: -1, 6: 1, 13: 1}
+    # 自测固定 6°/45°/s，避免用户把实拍速度调高后断言跟着变
+    cfg["global"]["max_step_deg"] = 6.0
+    cfg["global"]["max_speed_deg_s"] = 45.0
     for joint in cfg["joints"]:
         joint["human_neutral"] = 0.0
+        joint["max_step_deg"] = 6.0
+        joint["max_speed_deg_s"] = 45.0
         sid = int(joint["servo_id"])
         if sid in test_signs:
             joint["sign"] = test_signs[sid]
@@ -1037,6 +1067,9 @@ def main() -> None:
         sys.exit(2)
     if args.ramp_steps < 1:
         print("[mimic] --ramp-steps 必须 >= 1")
+        sys.exit(2)
+    if args.park_ramp_ms <= 0:
+        print("[mimic] --park-ramp-ms 必须大于 0")
         sys.exit(2)
     if args.bridge_timeout <= 0:
         print("[mimic] --bridge-timeout 必须大于 0")

@@ -98,12 +98,16 @@ python main_mimic_demo.py --side-view data/side_stream
 
 ```bash
 python main_mimic_demo.py --live --side-view data/side_stream \
-    --ramp-ms 800 --ramp-steps 8
+    --live-hz 8 --ramp-ms 0
 ```
 
-- `--ramp-ms`：把一次目标铺成连续轨迹的总时长；先试 800，再按观感调。
-- `--ramp-steps`：插值步数；越大越平滑（帧数 = steps × 关节数）。
-- 如果动作太慢：调 `mimic_config.json` 的 `global.max_step_deg`（默认 6°）。
+- 桥接现在用设备端**常驻串口 worker**，单次写入约 **30ms**；`--live-hz` 控制提交频率。
+- `--ramp-ms`：可选，把一次目标铺成连续轨迹；0 = 不插值。舵机有 3~4° 死区，
+  步长小于死区时可能不动，所以先试 8Hz、每步约 5.6°；需要更平滑再试 `--ramp-ms 100`。
+- `--ramp-steps`：插值步数；越大帧数越多。
+- **退出回位**：默认 `--park-on-exit`，按 `q`/关窗时把机器人缓慢送回配置里的中立 tick
+  （`--park-ramp-ms 4000`，约 45°/s）；`--no-park-on-exit` 关闭。
+- 如果动作太慢：调 `mimic_config.json` 的 `global.max_step_deg` / `max_speed_deg_s`。
 
 ## 相机
 
@@ -122,7 +126,7 @@ python calibrate_robot.py probe --joint 3 --delta 60 --yes
 python calibrate_robot.py probe --joint 8 --delta 60 --yes
 python calibrate_robot.py probe --joint 6 --delta 60 --yes
 python calibrate_robot.py probe --joint 13 --delta 60 --yes
-python calibrate_robot.py apply --sign 3=+1 --sign 8=-1 --sign 6=+1 --sign 13=-1
+python calibrate_robot.py apply --sign 3=+1 --sign 8=-1 --sign 6=+1 --sign 13=+1
 ```
 
 人体中立位（`human_neutral`）在运行时按 `n` 采集，不在标定工具里。
@@ -131,6 +135,8 @@ python calibrate_robot.py apply --sign 3=+1 --sign 8=-1 --sign 6=+1 --sign 13=-1
 
 - 单相机 2D 投影有歧义：前后抬和侧向抬在某些视角下会互相混淆；遮挡也会让读数不可靠。
 - 都是 2D 像面代理量，不是真实三维角。
-- 桥接逐次 adb 调用约 0.8s；`ramp` 只让运动连续，不能消除更新延迟。
-  要更快需要设备端常驻串口服务或舵机 profile velocity。
+- 桥接写已改为设备端常驻 worker，单次约 30ms；剩余卡顿主要来自关键点抖动、
+  **完全折叠时腕点丢失**（`no_point`/`out_of_frame`），以及舵机 3~4° 死区。
+- 肘部角度限幅在 `mimic_config.json` 的 `min_deg` / `max_deg`；当前左 140°、右 -180°，
+  是按全局 tick 放的，机械极限必须现场确认后按需收紧。
 - `models/` 和 `data/` 都不提交；`data/` 里可能有实拍画面，默认被 gitignore。
